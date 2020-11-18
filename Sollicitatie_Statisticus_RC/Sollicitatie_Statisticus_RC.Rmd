@@ -1,0 +1,112 @@
+--- 
+title: "Sollicitatie statisticus"
+author: "Raïsa Carmen"
+site: bookdown::bookdown_site
+output:
+  bookdown::pdf_book:
+    base_format: INBOmd::inbo_slides
+    subtitle: "19 november 2020"
+    institute: "Instituut Natuur- en Bosonderzoek"
+    toc: FALSE
+    slide_level: 1
+    theme: inbo
+    font_flanders: FALSE
+---
+
+```{r setup, include = FALSE}
+library(knitr)
+library(ggplot2)
+library(gtools)
+library(knitr)
+library(kableExtra)
+library(car)
+opts_chunk$set(
+  dev = "cairo_pdf"
+)
+library(tidyverse)
+library(INBOtheme)
+if (interactive()) {
+  theme_set(
+    theme_inbo(
+      base_family = "Calibri", # "Flanders Art Sans",
+      base_size = 12,
+      transparent = "plot"
+    )
+  )
+} else {
+  theme_set(
+    theme_inbo(
+      base_family = "Calibri", # "Flanders Art Sans",
+      base_size = 6,
+      transparent = "plot"
+    )
+  )
+  update_geom_defaults("text", list(size = 3))
+}
+```
+
+# Data overzicht
+
+```{r readData, include = FALSE}
+Data <- read.delim( sprintf('%s/data/labotest.txt',getwd()),header = TRUE, sep = "\t", dec = ".") %>% mutate(Toestel = as.factor(Toestel),
+                          Laag = str_detect(Staal,regex('laag')),
+                          Mid = str_detect(Staal,regex('mid')),
+                          Hoog = str_detect(Staal,regex('hoog')),
+                          S123 = str_detect(Staal,regex('123')),
+                          Type = factor(Type, levels= c('OUD', 'NIEUW'))) 
+Data$staalType <- factor(as.factor(ifelse(Data$Laag,'Laag',ifelse(Data$Mid,'Mid',ifelse(Data$Hoog,'Hoog','123')))),levels = c('Laag','Mid','Hoog','123'))
+
+```
+
+- `r nlevels(Data$Staal)` verschillende soorten stalen 
+
+```{r boxplot-staal, out.width = "80%", fig.asp = 0.5, echo=FALSE}
+ggplot(Data) + geom_boxplot(aes(x = Staal, y = Concentratie)) + coord_flip()
+```
+
+# Data overzicht
+- `r nlevels(factor(Data[Data$Type=='OUD','Toestel']))` verschillende toestellen gebruikt voor de oude proeven en `r nlevels(factor(Data[Data$Type=='NIEUW','Toestel']))` toestellen voor de nieuwe proeven. 
+- De helft van de stalen voorbereid met de 'CR' methode en de helft met de 'ML' methode.
+
+```{r dots, out.width = "80%", fig.asp = 0.5, echo=FALSE}
+ggplot(Data) + geom_point(aes(x = Toestel, y = Concentratie, color = Prep, pch = Type), alpha = 1, size = 1) + coord_flip() +  facet_wrap(facets = vars(staalType), scale = 'free') + geom_point(data=Data[80,], 
+             aes(x = Toestel, y = Concentratie, pch = Type), 
+             color='red',show.legend = FALSE,
+             size=3)
+
+```
+
+# Data analyse
+
+(1) Lineair regressiemodel 
+
+```{r lineairModelinteracties,  include = TRUE, echo = FALSE}
+model_lm3 <- lm(Concentratie ~  Type + Prep + staalType + Type*Prep, data = Data[-80,])
+m1coef<-summary(model_lm3)
+m1coef$coefficients[,'Pr(>|t|)'] <- paste0(round(m1coef$coefficients[,'Pr(>|t|)'],digits=3),
+                                  stars.pval(m1coef$coefficients[,'Pr(>|t|)']))
+m1coef$coefficients[,'Estimate'] <- round(as.numeric(m1coef$coefficients[,'Estimate']),digits=3)
+m1coef$coefficients[,'Std. Error'] <- round(as.numeric(m1coef$coefficients[,'Std. Error']),digits=3)
+S <- rbind(m1coef$coefficients[,c(1,2,4)],
+           c(as.character(round(m1coef$r.squared,digits=5)),'','' ),
+           c(as.character(round(BIC(model_lm3)),digits=3),'',''),           
+           c(as.character(round(AIC(model_lm3)),digits=3),'',''))
+rownames(S)[(nrow(S)-2):nrow(S)] <- c('Rsquared','BIC','AIC')
+rownames(S) <- str_remove(rownames(S),'TRUE')
+kable(S, linesep = "",
+      "latex", booktabs = T) %>%
+  kable_styling(bootstrap_options = c("striped"),font_size = 7) %>%
+  row_spec((nrow(S)-3),hline_after=T)
+```
+
+(2) Homogeniteitstest van de variantie: Geen significant verschil tussen variantie bij oude of nieuwe techniek
+
+# Conclusie
+
+- Significant hoger gemeten concentratie bij niewe techniek en ML methode
+  * Is hoger beter?
+
+- Kies voor één van de technieken en één van de voorbereidingsmethoden voor vergelijkbare resultaten
+  * Test capaciteit? 
+  * Aanpassen grenswaarden of normen
+- Meer testen nodig voor robuustere resultaten

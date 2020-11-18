@@ -1,0 +1,326 @@
+---
+title: "Sollicitatie statisticus: Case oplossing"
+author: 
+  - name: "Raïsa Carmen"
+    email: "raisa.carmen@inbo.be"
+bibliography: references.bib
+link-citations: TRUE
+site: bookdown::bookdown_site
+output:
+  bookdown::pdf_book:
+    includes:
+      in_header: preamble.tex
+    base_format: INBOmd::inbo_rapport
+    floatbarrier: "section"
+    lang: nl
+    lof: FALSE
+    lot: FALSE
+    style: INBO
+    keep_tex: yes
+  bookdown::html_document2: 
+    fig_caption: yes
+  bookdown::epub_book:
+    stylesheet: css/inbo_rapport.css
+    template: css/inbo.epub3
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# Inleiding en data exploratie
+
+In dit rapport wordt een nieuwe analysetechniek om bepaalde concentraties in bodemstalen te meten vergeleken met een oudere techniek. Het doel is om te bepalen welke techniek de beste is. 
+```{r setup, include = FALSE}
+library(ggplot2)
+library(gtools)
+library(knitr)
+library(tidyverse)
+library(INLA)
+library(kableExtra)
+library(car)
+
+opts_chunk$set(
+  echo = FALSE,
+  eval = TRUE,
+  cache = FALSE,
+  fig.width = 150 / 25.4,
+  fig.height = 100 / 25.4,
+  warning = TRUE,
+  error = FALSE,
+  message = TRUE
+)
+library(tidyverse)
+library(INBOtheme)
+if (interactive()) {
+  theme_set(
+    theme_inbo(
+      base_family = "Calibri", # "FlandersArtSans-Regular",
+      base_size = 10
+    )
+  )
+} else {
+  switch(
+    opts_knit$get("rmarkdown.pandoc.to"),
+    html = {
+      opts_chunk$set(dev = "png", dpi = 72)
+      theme_set(
+        theme_inbo(
+          base_family = "Calibri", # "FlandersArtSans-Regular",
+          base_size = 12
+        )
+      )
+    },
+    latex = {
+      opts_chunk$set(dev = "cairo_pdf", dpi = 300)
+      theme_set(
+        theme_inbo(
+          base_family = "Calibri", # "FlandersArtSans-Regular",
+          base_size = 9
+        )
+      )
+      update_geom_defaults("point", list(size = 1.5))
+    },
+    epub3 = {
+      opts_chunk$set(dev = "png", dpi = 300)
+      theme_set(
+        theme_inbo(
+          base_family = "Calibri", # "FlandersArtSans-Regular",
+          base_size = 12
+        )
+      )
+    }
+  )
+}
+```
+
+
+```{r readData, include = FALSE}
+Data <- read.delim( sprintf('%s/data/labotest.txt',getwd()),header = TRUE, sep = "\t", dec = ".") %>% mutate(Toestel = as.factor(Toestel),
+                          Laag = str_detect(Staal,regex('laag')),
+                          Mid = str_detect(Staal,regex('mid')),
+                          Hoog = str_detect(Staal,regex('hoog')),
+                          S123 = str_detect(Staal,regex('123')),
+                          Type = factor(Type, levels= c('OUD', 'NIEUW'))) 
+Data$staalType <- factor(as.factor(ifelse(Data$Laag,'Laag',ifelse(Data$Mid,'Mid',ifelse(Data$Hoog,'Hoog','123')))),levels = c('Laag','Mid','Hoog','123'))
+
+```
+
+In totaal zijn er `r nlevels(Data$Staal)` verschillende soorten stalen die ieder `r nrow(Data)/nlevels(Data$Staal)` keren getest werden; 8 keer met de nieuwe techniek en 16 keer met de oude techniek. Er werden `r nlevels(factor(Data[Data$Type=='OUD','Toestel']))` verschillende toestellen gebruikt voor de oude proeven en `r nlevels(factor(Data[Data$Type=='NIEUW','Toestel']))` toestellen voor de nieuwe proeven. Tot slot werd de helft van de stalen voorbereid met de 'CR' methode en de helft met de 'ML' methode.
+
+We bestuderen eerst de trends met enkele figuren. De boxplots in figuur \@ref(fig:boxplot-staal) tonen dat er vier groepen van stalen lijken te bestaan: die met respectievelijk een lage, middelmatige en hoge concentratie, en staal_123 dat ergens tussen de stalen met middelmatige en hoge concentratie zit. 
+
+```{r boxplot-staal, fig.height=4, fig.width=7, fig.cap = "Concentratie voor ieder type staal"}
+ggplot(Data) + geom_boxplot(aes(x = Staal, y = Concentratie)) + coord_flip()
+```
+
+Figuur \@ref(fig:dots) lijkt aan te tonen dat de nieuwe methode consequent hogere concentraties meet dan de oude methode. Een tweede interessante conclusie is dat de nieuwe methode gevoeliger lijkt te zijn voor de manier waarop de stalen worden voorbereid. De ML methode om de stalen voor te bereiden resulteert steeds in hogere gemeten concentraties dan de CR methode. De stijging in gemeten concentratie door het gebruiken van ML is groter bij de nieuwe methode dan bij de oude methode. Een laatste detail dat we kunnen opmerken uit figuur \@ref(fig:dots), is dat er mogelijks een outlier is bij staal 123 en machine 8 (in het rood aangeduid op figuur \@ref(fig:dots)).
+```{r dots, fig.height=7, fig.width=7, fig.cap = "Gemeten concentratie op ieder toestel en voor beide voorbereidingsmethoden (CR en ML)"}
+ggplot(Data) + geom_point(aes(x = Toestel, y = Concentratie, color = Prep, pch = Type), alpha = 1, size = 1) + coord_flip() +  facet_wrap(facets = vars(staalType), scale = 'free') + geom_point(data=Data[80,], 
+             aes(x = Toestel, y = Concentratie, pch = Type), 
+             color='red',show.legend = FALSE,
+             size=3)
+
+```
+
+
+
+# Data analyse
+
+Nu we wat meer inzicht hebben in de data, gaan we verder met het testen van enkele statistische modellen. 
+```{r modelBYSFixed,  include = FALSE}
+# model_fixed <- inla(Concentratie ~  Type + Prep , data = Data,
+# control.compute = list(waic = TRUE))
+# #model_fixed$summary.fixed#m
+# model_fixed$summary.fixed %>%
+#   select(1, lcl = 3, ucl = 5) %>%
+#   kable(caption = "model parameters", digits = 5)
+#check of de prior ok is:
+# plot(model_fixed$marginals.fixed$Type, type = "l")
+# plot(model_fixed$marginals.fixed$Prep, type = "l")
+```
+```{r modelBYSHyper,  include = FALSE}
+# to_sigma <- function(tau){sqrt(1/tau)}
+# 
+# model_hyper <- inla(Concentratie ~  Type + Prep +
+#                       f(Toestel,model ="iid") +
+#                       #f(Staal,model ="iid"),
+#                     f(staalType,model = "iid"),
+#                     data = Data,
+#                     control.compute = list(waic = TRUE))
+# #model_fixed$summary.fixed#m
+# model_hyper$summary.fixed %>%
+#   select(1, lcl = 3, ucl = 5) %>%
+#   kable(caption = "model parameters", digits = 5)
+# #check of de prior ok is:
+# # plot(model_fixed$marginals.fixed$Type, type = "l")
+# # plot(model_fixed$marginals.fixed$Prep, type = "l")
+# model_hyper$marginals.hyperpar$`Precision for staalType` %>%
+# inla.tmarginal(fun = to_sigma) %>%
+# inla.zmarginal()
+
+#glimpse(model_hyper$summary.random$staalType)
+# library(inlatools)
+# plot(simulate_iid(sigma = 2))
+```
+## Lineair regressiemodel 
+
+Allereerst testen we een simpel lineair regressiemodel met de concentratie als afhankelijke variabele en alle mogelijke verklarende variabelen (staal, toestel, type techniek, en prep: de manier waarop de staal is voorbereid).  Het model wordt getoont in tabel \@ref(tab:SimpleModelTable). Merk op dat toestel 1 de referentie is voor de oude methode en toestel 9 voor de nieuwe methode waardoor deze twee toestellen niet in tabel \@ref(tab:SimpleModelTable) verschijnen. Als we op dit model nu een Bonferroni outlier test toepassen, zien we dat observatie 80 (zoals aangeduid in het rood op figuur \@ref(fig:dots)) inderdaad een outlier is. 
+
+```{r lineairModels,  include = FALSE}
+model_lm <- lm(Concentratie ~  Type + Prep + Staal + (Toestel==2) + (Toestel==3) + (Toestel==4) + (Toestel==5) + (Toestel==6) + (Toestel==7) + (Toestel==8) + (Toestel==10) + (Toestel==11) + (Toestel==12), data = Data)
+
+```
+```{r outliertest,  include = TRUE}
+outlierTest(model_lm)
+```
+
+De qqplot in figuur\@ref(fig:qqplotsimpleModel) toont ook duidelijk dat meting 80 een outlier is. In verder analyses zal deze meting dan ook buiten beschouwing gelaten worden.
+
+```{r SimpleModelTable,  include = TRUE}
+m1coef<-summary(model_lm)
+m1coef$coefficients[,'Pr(>|t|)'] <- paste0(round(m1coef$coefficients[,'Pr(>|t|)'],digits=3),
+                                  stars.pval(m1coef$coefficients[,'Pr(>|t|)']))
+m1coef$coefficients[,'Estimate'] <- round(as.numeric(m1coef$coefficients[,'Estimate']),digits=3)
+m1coef$coefficients[,'Std. Error'] <- round(as.numeric(m1coef$coefficients[,'Std. Error']),digits=3)
+S <- rbind(m1coef$coefficients[,c(1,2,4)],
+           c(as.character(round(m1coef$r.squared,digits=5)),'','' ),
+           c(as.character(round(BIC(model_lm)),digits=3),'',''),           
+           c(as.character(round(AIC(model_lm)),digits=3),'',''))
+rownames(S)[(nrow(S)-2):nrow(S)] <- c('Rsquared','BIC','AIC')
+rownames(S) <- str_remove(rownames(S),'TRUE')
+kable(S,caption = "Simpele lineaire regressie ( '***' = < 0.001, '**' = < 0.01, '*' = < 0.05, '.' = < 0.1)", linesep = "",
+      "latex", booktabs = T) %>%
+  kable_styling(bootstrap_options = c("striped"),font_size = 7) %>%
+  row_spec((nrow(S)-3),hline_after=T)
+
+```
+
+```{r qqplotsimpleModel,  include = TRUE, fig.height=5, fig.width=10, fig.cap = "qqPlot voor het simpele lineare model", echo = FALSE, results='hide',fig.keep='all', include= TRUE, results="hide", warning=FALSE}
+qqPlot(model_lm, simulate=T, lables=T)
+```
+
+Uit het model in tabel \@ref(tab:SimpleModelTable) kunnen we afleiden dat er weinig verschil is tussen de toestellen. Bovendien lijken er weinig interne verschillen te zijn tussen de drie stalen met lage, middelhoge, en hoge concentraties. Het vereenvoudigde model in tabel \@ref(tab:lineairModelvereenvoudigd) heeft een lagere BIC en AIC wat ruwweg wil zeggen dat het model eenvoudiger is en toch nog steeds een goede voorspellingskracht heeft. 
+
+```{r lineairModelvereenvoudigd,  include = TRUE}
+model_lm2 <- lm(Concentratie ~  Type + Prep + staalType, data = Data[-80,])
+m1coef<-summary(model_lm2)
+m1coef$coefficients[,'Pr(>|t|)'] <- paste0(round(m1coef$coefficients[,'Pr(>|t|)'],digits=3),
+                                  stars.pval(m1coef$coefficients[,'Pr(>|t|)']))
+m1coef$coefficients[,'Estimate'] <- round(as.numeric(m1coef$coefficients[,'Estimate']),digits=3)
+m1coef$coefficients[,'Std. Error'] <- round(as.numeric(m1coef$coefficients[,'Std. Error']),digits=3)
+S <- rbind(m1coef$coefficients[,c(1,2,4)],
+           c(as.character(round(m1coef$r.squared,digits=5)),'','' ),
+           c(as.character(round(BIC(model_lm2)),digits=3),'',''),           
+           c(as.character(round(AIC(model_lm2)),digits=3),'',''))
+rownames(S)[(nrow(S)-2):nrow(S)] <- c('Rsquared','BIC','AIC')
+rownames(S) <- str_remove(rownames(S),'TRUE')
+kable(S,caption = "Vereenvoudigde lineaire regressie ( '***' = < 0.001, '**' = < 0.01, '*' = < 0.05, '.' = < 0.1)", linesep = "",
+      "latex", booktabs = T) %>%
+  kable_styling(bootstrap_options = c("striped"),font_size = 7) %>%
+  row_spec((nrow(S)-3),hline_after=T)
+```
+
+Als laatste test, werden er nog enkele interactie-effecten toegevoegd aan het model. Bij dit model is BIC en AIC nog lager. Dit model heeft slechts een zeer licht significante positieve coëfficient voor het enkelvoudige effect van de nieuwe techniek. Echter, de interactieterm met het type voorbereiding is wel significant positief. Dit betekent dat er bij de lage concentratiestalen en een CR voorbereiding weinig verschil verwacht wordt tussen de oude en nieuwe methode.
+
+<!-- ```{r lineairModelinteracties,  include = TRUE} -->
+<!-- model_lm3 <- lm(Concentratie ~  Type + Prep + staalType + Type*Prep, data = Data[-80,]) -->
+<!-- model_lm4 <- lm(Concentratie ~  Type + Prep + staalType+ Type*Prep + Type*staalType, data = Data[-80,]) -->
+<!-- model_lm5 <- lm(Concentratie ~  Type + Prep + staalType+ Type*Prep + Type*staalType + Prep*staalType, data = Data[-80,]) -->
+<!-- m3coef<-summary(model_lm3) -->
+<!-- m4coef<-summary(model_lm4) -->
+<!-- m5coef<-summary(model_lm5) -->
+<!-- S <- cbind(paste0(round(m5coef$coefficients[,'Estimate'],digits=3), -->
+<!--                                   stars.pval(m5coef$coefficients[,'Pr(>|t|)']))) -->
+<!-- rownames(S) <- rownames(m5coef$coefficients) -->
+<!-- S<-cbind(S,rep("",nrow(S)),rep("",nrow(S))) -->
+<!-- S[rownames(m4coef$coefficients),2] <- paste0(round(m4coef$coefficients[,'Estimate'],digits=3), -->
+<!--                                   stars.pval(m4coef$coefficients[,'Pr(>|t|)'])) -->
+<!-- S[rownames(m3coef$coefficients),3] <- paste0(round(m3coef$coefficients[,'Estimate'],digits=3), -->
+<!--                                   stars.pval(m3coef$coefficients[,'Pr(>|t|)'])) -->
+<!-- S <- rbind(S, -->
+<!--            c(as.character(round(m5coef$r.squared,digits=5)),as.character(round(m4coef$r.squared,digits=5)),as.character(round(m3coef$r.squared,digits=5)) ), -->
+<!--            c(as.character(round(BIC(model_lm2)),digits=3),as.character(round(BIC(model_lm4)),digits=3),as.character(round(BIC(model_lm3)),digits=3)),            -->
+<!--            c(as.character(round(AIC(model_lm2)),digits=3),as.character(round(AIC(model_lm4)),digits=3),as.character(round(AIC(model_lm3)),digits=3))) -->
+<!-- colnames(S) <-c('Model 1','Model 2','Model 3') -->
+<!-- rownames(S)[(nrow(S)-2):nrow(S)] <- c('Rsquared','BIC','AIC') -->
+<!-- kable(S,caption = "Lineaire regressies met interactieeffecten ( '***' = < 0.001, '**' = < 0.01, '*' = < 0.05)", linesep = "", -->
+<!--       "latex", booktabs = T) %>% -->
+<!--   kable_styling(bootstrap_options = c("striped"),font_size = 7) %>% -->
+<!--   row_spec((nrow(S)-3),hline_after=T) -->
+<!-- ``` -->
+```{r lineairModelinteracties,  include = TRUE}
+model_lm3 <- lm(Concentratie ~  Type + Prep + staalType + Type*Prep, data = Data[-80,])
+m1coef<-summary(model_lm3)
+m1coef$coefficients[,'Pr(>|t|)'] <- paste0(round(m1coef$coefficients[,'Pr(>|t|)'],digits=3),
+                                  stars.pval(m1coef$coefficients[,'Pr(>|t|)']))
+m1coef$coefficients[,'Estimate'] <- round(as.numeric(m1coef$coefficients[,'Estimate']),digits=3)
+m1coef$coefficients[,'Std. Error'] <- round(as.numeric(m1coef$coefficients[,'Std. Error']),digits=3)
+S <- rbind(m1coef$coefficients[,c(1,2,4)],
+           c(as.character(round(m1coef$r.squared,digits=5)),'','' ),
+           c(as.character(round(BIC(model_lm3)),digits=3),'',''),           
+           c(as.character(round(AIC(model_lm3)),digits=3),'',''))
+rownames(S)[(nrow(S)-2):nrow(S)] <- c('Rsquared','BIC','AIC')
+rownames(S) <- str_remove(rownames(S),'TRUE')
+kable(S,caption = "Lineaire regressies met interactie effect ( '***' = < 0.001, '**' = < 0.01, '*' = < 0.05, '.' = < 0.1)", linesep = "",
+      "latex", booktabs = T) %>%
+  kable_styling(bootstrap_options = c("striped"),font_size = 7) %>%
+  row_spec((nrow(S)-3),hline_after=T)
+```
+
+## Analyse van de variantie 
+
+Een goede meettechniek meet best waardes zo dicht mogelijk bij de echte waarde. Aangezien het niet duidelijk is wat de *echte* concentratie is in de stalen, kunnen we geen uitspraak doen over of de hoger gemeten waarde van de nieuwe methode correcter is. Echter, we willen ook dat de methode nauwkeurig is of, anders gezegd, dat de variantie laag is.
+
+Uit sectie \@ref(lineair-regressiemodel) bleek dat er weinig verschil is tussen de toestellen en dat er vier groepen van stalen bestaan; stalen met lage concentratie, stalen met middelhoge concentratie, stalen met hoge concentratie en staal_123. Om te testen of er een significant verschil is in de variantie, kunnen we Bartlett's test of Levene's test gebruiken. Aangezien Levene's test beter overweg kan met data die niet normaal verdeeld is maar Bartlett's test te verkiezen is indien de data wel normaal is, gaan we eerst na of we normaliteit kunnen veronderstellen met Shapiro-Wilk test. De nulhypothese in de Bartlett's en Levene's test is steeds dat de varianties van de oude en nieuwe techniek gelijk zijn aan elkaar. Indien de p-waarde kleiner is dan 0.05, kunnen we de nulhypothese verwerpen en veronderstellen dat de varianties niet gelijk zijn aan elkaar. Tabel \@ref(tab:VarianceTest) toont dat we de nulhypothese in ieder van de scenario's mogen aanvaarden; de varianties zijn nooit significant verschillend bij de nieuwe of oude techniek. Mogelijks is dit te wijten aan het kleine aantal observaties.
+
+```{r VarianceTest,  include = TRUE}
+Tbl <- matrix(nrow=8, ncol=4)
+colnames(Tbl) <- c('variantie oude techniek \n(aantal observaties)','Variantie nieuwe techniek \n(aantal observaties)', 'P-waarde','Test')
+staal<- c('Laag','Mid','Hoog','123')
+prep <- c('CR','ML')
+rownames(Tbl) <- rep('',8)
+  for(j in 1:2){
+    for(i in 1:4){
+    oud<-Data[Data$staalType==staal[i] & Data$Prep==prep[j] & Data$Type=='OUD' & rownames(Data)!='80',]
+    nieuw<-Data[Data$staalType==staal[i] & Data$Prep==prep[j] & Data$Type=='NIEUW'& rownames(Data)!='80',]
+    shap1 <- shapiro.test(oud$Concentratie)
+    shap2 <- shapiro.test(nieuw$Concentratie)
+    if(shap1$p.value>0.05 & shap2$p.value>0.05){
+      #normality can be assumed --> use barlett's test
+      b<-bartlett.test(list(oud$Concentratie, nieuw$Concentratie))
+      Tbl[j+2*(i-1),] <- c(paste(round(var(oud$Concentratie),digits=3),'(',nrow(oud),')'),paste(round(var(nieuw$Concentratie),digits=3),'(',nrow(nieuw),')'),paste0(round(b$p.value,digits=3), stars.pval(b$p.value)),'Bartlett')
+      rownames(Tbl)[j+2*(i-1)] <- paste0('Concentratie', staal[i], ', voorbereiding', prep[j])
+      #print('normal')
+    }else{
+      #normality cannot be assumed --> use levene's test
+      #print('not normal')
+      l<-leveneTest(y=c(oud$Concentratie,nieuw$Concentratie),group=factor(c(rep('oud',nrow(oud)), rep('nieuw',nrow(nieuw)))))
+      Tbl[j+2*(i-1),] <- c(paste(round(var(oud$Concentratie),digits=3),'(',nrow(oud),')'),paste(round(var(nieuw$Concentratie),digits=3),'(',nrow(nieuw),')'),paste0(round(l$`Pr(>F)`[1],digits=3), stars.pval(l$`Pr(>F)`[1])),'Levene')
+      rownames(Tbl)[j+2*(i-1)] <- paste0('Concentratie', staal[i], ', voorbereiding', prep[j])
+     # print('not normal')
+    }
+  }
+  }
+kable(Tbl,caption = "Overzicht homogeniteitstest varianties", linesep = "",
+      "latex", booktabs = T) %>%
+  kable_styling(bootstrap_options = c("striped"),font_size = 7) 
+```
+
+
+# Conclusie
+Uit de dataanalyse kunnen we afleiden dat de nieuwe techniek hogere concentraties meet dan de oude methode. Het verschil tussen beide technieken is bovendien groter:
+
+- indien de stalen voorbereid worden met de ML methode in plaats van de CR methode
+- indien de stalen een hogere concentratie hebben
+
+We kunnen geen uitspraak doen over of een hogere concentratie beter of correcter is. De laboranten zijn beter geplaatst om in te schatten of de hogere concentraties een gevolg zijn van, bijvoorbeeld, vals positieven of, omgekeerd, van nauwkeurigere meting van kleine deeltjes in de stalen.
+
+
+Met de huidige dataset kunnen we geen significant verschil detecteren in de nauwkeurigheid (variantie) van beide technieken.
+
+Deze conclusie heeft belangrijke implicaties voor eventuele grenswaarden of normen die nu vastliggen voor bodemconcentraties. Indien de nieuwe methode gebruikt wordt in de toekomst, moeten bestaande grenswaarden naar boven worden bijgesteld. Stel dat er momenteel bijvoorbeeld maximaal toegestane concentratie is van 900, dan vallen alle stalen met de oude methode onder deze waarde maar met de nieuwe methode overschrijden de hoge concentratie stalen deze grenswaarde indien de stalen voorbereid zijn met de ML methode. 
+
+Door het grote verschil in de metingen is het niet aangeraden om beide methoden naast elkaar te blijven gebruiken; er moet een keuze worden gemaakt voor één van beide methoden om vergelijkbare resultaten te verkrijgen. Hierdoor zal er ook goed moeten worden nagedacht over de testcapaciteit; is vier toestellen voldoende om volledig over te schakelen op de nieuwe methode? Aangezien het verschil in gemeten concentratie ook significant is tussen beide voorbereidingstechnieken, stellen we voor om ook hier een keuze in te maken. De ML methode geeft typisch hogere concentraties dan de CR methode.
+
+
+Om meer over de betrouwbaarheid te kunnen zeggen van de nieuwe techniek, kan het nuttig zijn om meerdere replicaties te doen van eenzelfde proefopzet (zelfde staal, zelfde machine, zelfde voorbereiding van het staal, en zelfde techniek).
